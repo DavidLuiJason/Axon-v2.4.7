@@ -1,0 +1,85 @@
+name: APK Size Report (read-only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download the newest successful debug APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow android-debug.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          echo "Run id: $ID"
+          test -n "$ID"
+          mkdir -p apk
+          gh run download "$ID" --repo "$GITHUB_REPOSITORY" --name axon-debug-apk --dir apk
+          ls -l apk
+
+      - name: Break the APK down
+        run: |
+          python3 - <<'PY'
+          import collections, glob, os, zipfile
+
+          path = glob.glob("apk/*.apk")[0]
+          z = zipfile.ZipFile(path)
+          infos = z.infolist()
+          out = open(os.environ["GITHUB_STEP_SUMMARY"], "a")
+
+          def w(s):
+              print(s)
+              out.write(s + "\n")
+
+          def group(n):
+              if n.startswith("assets/public/dictionary/"):
+                  return "assets/public/dictionary (the dictionary)"
+              if n.startswith("assets/public/"):
+                  return "assets/public (rest of the web app)"
+              if n.startswith("assets/"):
+                  return "assets (other)"
+              if n.startswith("classes") and n.endswith(".dex"):
+                  return "code (dex)"
+              if n.startswith("res/") or n == "resources.arsc":
+                  return "resources"
+              if n.startswith("lib/"):
+                  return "native libraries"
+              if n.startswith("META-INF/"):
+                  return "signing"
+              return "other"
+
+          groups = collections.OrderedDict()
+          for i in infos:
+              g = groups.setdefault(group(i.filename), [0, 0, 0, 0])
+              g[0] += 1
+              g[1] += i.compress_size
+              g[2] += i.file_size
+              if i.compress_type == zipfile.ZIP_STORED:
+                  g[3] += 1
+
+          w("## APK size report")
+          w("")
+          w("APK file size: %.2f MB. Entries inside: %d." % (os.path.getsize(path) / 1e6, len(infos)))
+          w("Sum of stored sizes inside: %.2f MB." % (sum(i.compress_size for i in infos) / 1e6))
+          w("")
+          for name, (count, comp, raw, stored) in groups.items():
+              w("- %s: %d files, %.2f MB in the APK, %.2f MB when unpacked, %d of them stored without compression" % (name, count, comp / 1e6, raw / 1e6, stored))
+          w("")
+          w("Biggest entries (size in the APK):")
+          for i in sorted(infos, key=lambda x: -x.compress_size)[:8]:
+              w("- %s: %.2f MB (unpacked %.2f MB)" % (i.filename, i.compress_size / 1e6, i.file_size / 1e6))
+          names = collections.Counter(i.filename for i in infos)
+          dups = [n for n, c in names.items() if c > 1]
+          w("")
+          w("Entries that appear more than once: %d" % len(dups))
+          zips = [i.filename for i in infos if i.filename.lower().endswith(".zip")]
+          w("Zip files inside the APK: %s" % (", ".join(zips) if zips else "none"))
+          out.close()
+          PY
