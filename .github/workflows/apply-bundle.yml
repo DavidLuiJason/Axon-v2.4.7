@@ -1,0 +1,45 @@
+name: Apply Bundle (one-time file copy)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Check, unzip and copy the bundle, then commit
+        run: |
+          set -e
+          ZIP=axon-dictionary-code-v2.4.6.zip
+          if [ ! -f "$ZIP" ]; then
+            echo "MISSING $ZIP in the repository root. Upload it there, then run this again."
+            exit 1
+          fi
+          echo "906d3c85d817a1fd27673ab547f0e7ac1384569cf05aec4ffded80da8b6cc404  $ZIP" | sha256sum -c -
+          rm -rf "$RUNNER_TEMP/bundle"
+          mkdir -p "$RUNNER_TEMP/bundle"
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/bundle"
+          COUNT=$(find "$RUNNER_TEMP/bundle" -type f | wc -l)
+          echo "Files in bundle: $COUNT"
+          test "$COUNT" = "12"
+          cp -r "$RUNNER_TEMP/bundle/." .
+          git rm -q --cached "$ZIP" 2>/dev/null || true
+          rm -f "$ZIP"
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git status --short
+          git commit -m "Apply dictionary code bundle v2.4.6 (12 files)"
+          git push origin HEAD:main
+          {
+            echo "## Bundle applied"
+            echo "12 files copied and committed to main:"
+            (cd "$RUNNER_TEMP/bundle" && find . -type f | sort | sed 's/^\.\//- /')
+          } >> "$GITHUB_STEP_SUMMARY"

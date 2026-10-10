@@ -1,0 +1,61 @@
+name: Memory Test (measurement only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  memory-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install JavaScript dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build with fake dictionary data and measure memory
+        run: |
+          python3 - <<'PY'
+          import base64, os, resource, shutil, subprocess, time
+
+          summary = open(os.environ["GITHUB_STEP_SUMMARY"], "a")
+          summary.write("## Memory test\n")
+          summary.write("Fake text files are put in public/synth, then the web build runs.\n\n")
+
+          def run_case(name, count):
+              shutil.rmtree("public/synth", ignore_errors=True)
+              shutil.rmtree("dist", ignore_errors=True)
+              os.makedirs("public/synth")
+              for i in range(count):
+                  data = base64.b64encode(os.urandom(14800)).decode()
+                  with open("public/synth/f%05d.json" % i, "w") as f:
+                      f.write(data)
+              mb = sum(os.path.getsize("public/synth/" + x) for x in os.listdir("public/synth")) / 1e6
+              before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+              start = time.time()
+              p = subprocess.run(["npm", "run", "build"], capture_output=True, text=True)
+              secs = time.time() - start
+              peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+              line = "- %s: %d files, %.1f MB, exit code %d, peak memory so far %d kB (before this case: %d kB), %.1f s" % (
+                  name, count, mb, p.returncode, peak, before, secs)
+              print(line)
+              print(p.stdout[-600:])
+              print(p.stderr[-600:])
+              summary.write(line + "\n")
+              summary.flush()
+
+          run_case("1x dictionary size", 3346)
+          run_case("2x dictionary size", 6692)
+          shutil.rmtree("public/synth", ignore_errors=True)
+          summary.close()
+          PY
+          free -m

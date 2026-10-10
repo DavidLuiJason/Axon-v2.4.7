@@ -1,0 +1,53 @@
+name: Fix Upload Names (one-time)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix-names:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Rename the uploaded zips by their fingerprint
+        run: |
+          set -e
+          BUNDLE=906d3c85d817a1fd27673ab547f0e7ac1384569cf05aec4ffded80da8b6cc404
+          DICT=682d481b60afa37b42d68aa9ba59f28e44073edd9ef238a157ba7f8cf04b54e0
+          found_bundle=0
+          found_dict=0
+          echo "## Zip files in the repository root" >> "$GITHUB_STEP_SUMMARY"
+          for f in *.zip; do
+            [ -e "$f" ] || continue
+            h=$(sha256sum "$f" | cut -d' ' -f1)
+            echo "- $f : $h" >> "$GITHUB_STEP_SUMMARY"
+            T=""
+            if [ "$h" = "$BUNDLE" ]; then
+              found_bundle=1
+              T="axon-dictionary-code-v2.4.6.zip"
+            elif [ "$h" = "$DICT" ]; then
+              found_dict=1
+              T="dictionary-en-v1.zip"
+            fi
+            if [ -n "$T" ] && [ "$f" != "$T" ]; then
+              if [ -e "$T" ]; then
+                git rm -q "$f"
+              else
+                git mv "$f" "$T"
+              fi
+            fi
+          done
+          echo "Bundle found: $found_bundle. Dictionary found: $found_dict." >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$(git status --short)" ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git commit -m "Fix uploaded zip names"
+            git push origin HEAD:main
+          fi
+          test "$found_bundle" = "1"
+          test "$found_dict" = "1"

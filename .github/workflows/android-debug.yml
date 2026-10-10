@@ -1,0 +1,139 @@
+name: Android Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Report build machine memory (measurement only)
+        run: |
+          {
+            echo "## Build machine"
+            echo '```'
+            free -m
+            echo "CPUs: $(nproc)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          free -m
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install JavaScript dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install dictionary (check fingerprint, then unzip)
+        run: |
+          set -e
+          ZIP=dictionary-en-v1.zip
+          if [ ! -f "$ZIP" ]; then
+            echo "MISSING $ZIP in the repository root. Upload it there, then run the build again."
+            exit 1
+          fi
+          echo "682d481b60afa37b42d68aa9ba59f28e44073edd9ef238a157ba7f8cf04b54e0  $ZIP" | sha256sum -c -
+          mkdir -p public/dictionary
+          unzip -q -o "$ZIP" -d public/dictionary
+          COUNT=$(find public/dictionary/en -type f | wc -l)
+          echo "Dictionary files unzipped: $COUNT"
+          test "$COUNT" = "3346"
+
+      - name: Web build
+        id: webbuild
+        run: npm run build
+
+      - name: Type check
+        id: typecheck
+        continue-on-error: true
+        run: npm run lint
+
+      - name: Background tests
+        id: tests
+        continue-on-error: true
+        run: npm run test:bg
+
+      - name: Kernel tests
+        id: kerneltests
+        continue-on-error: true
+        run: npm run test:kernel
+
+      - name: Chat session tests
+        id: chattests
+        continue-on-error: true
+        run: npm run test:chat
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Apply AXON Android overlay
+        run: |
+          chmod +x scripts/apply-android-overlay.sh
+          ./scripts/apply-android-overlay.sh
+
+      - name: Sync web build into Android project
+        run: npx cap sync android
+
+      - name: Assemble debug APK
+        id: apk
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Count dictionary files inside the APK
+        id: apkdict
+        continue-on-error: true
+        run: |
+          set -e
+          N=$(unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep '^assets/public/dictionary/en/' | grep -vc '/$')
+          echo "Dictionary files inside the APK: $N"
+          echo "APK_DICT_FILES=$N" >> "$GITHUB_ENV"
+          test "$N" = "3346"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: axon-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload generated lockfile
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: package-lock
+          path: package-lock.json
+          if-no-files-found: warn
+
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## AXON build summary"
+            echo "- Web build: ${{ steps.webbuild.outcome }}"
+            echo "- Type check: ${{ steps.typecheck.outcome }}"
+            echo "- Background tests: ${{ steps.tests.outcome }}"
+            echo "- Kernel tests: ${{ steps.kerneltests.outcome }}"
+            echo "- Chat session tests: ${{ steps.chattests.outcome }}"
+            echo "- Debug APK: ${{ steps.apk.outcome }}"
+            echo "- Dictionary files in the APK: ${APK_DICT_FILES:-not counted} (expected 3346): ${{ steps.apkdict.outcome }}"
+          } >> "$GITHUB_STEP_SUMMARY"
